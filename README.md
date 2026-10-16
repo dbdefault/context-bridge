@@ -23,6 +23,8 @@ No cloud. No API keys. No vendor lock-in.
 
 ## Quick Start
 
+_Get started in 5 minutes_:
+
 ```bash
 pip install git+https://github.com/yunaremaia/context-bridge.git
 
