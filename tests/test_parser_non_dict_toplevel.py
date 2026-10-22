@@ -105,8 +105,9 @@ class TestClaudeCodeJsonl:
             + "\n"
         )
         sessions = list(parse_claude_code_jsonl(f))
-        assert len(sessions) == 2
-        assert all(s.content == "Use SQLite for the index." for s in sessions)
+        # Same session_id is aggregated into one Session (issue #112).
+        assert len(sessions) == 1
+        assert sessions[0].content.count("Use SQLite for the index.") == 2
 
     def test_valid_dict_is_still_parsed(self, tmp_path):
         f = tmp_path / "session.jsonl"

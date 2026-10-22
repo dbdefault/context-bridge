@@ -63,6 +63,9 @@ def index(ctx, path):
                 rowid = store.add_session(session)
                 if rowid > 0:
                     total_sessions += 1
+                    # Mark so re-runs can skip via is_indexed; previously the
+                    # column was never set on the index path.
+                    store.mark_indexed(session.session_id)
                     memory = Memory(
                         content=session.content,
                         memory_type=MemoryType.PATTERN,

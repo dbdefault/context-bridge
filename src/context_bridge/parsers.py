@@ -35,7 +35,18 @@ def extract_text_content(content) -> list[str]:
 def parse_claude_code_jsonl(
     file_path: Path, agent: str = "claude"
 ) -> Iterator[Session]:
-    """Parse Claude Code JSONL session logs."""
+    """Parse Claude Code JSONL session logs.
+
+    Claude Code writes one file per conversation; every ``user``/``assistant``
+    event in that file shares the same ``session_id``. Events are aggregated
+    into one ``Session`` per ``session_id`` so the store's ``UNIQUE(session_id)``
+    insert keeps the full transcript instead of silently dropping all but the
+    first event.
+    """
+    # Preserve first-seen order while collecting every event for a session_id.
+    buckets: dict[str, dict] = {}
+    order: list[str] = []
+
     with open(file_path) as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
@@ -76,15 +87,28 @@ def parse_claude_code_jsonl(
             if not content.strip():
                 content = json.dumps(data, ensure_ascii=False)
 
-            yield Session(
-                session_id=session_id,
-                agent=agent,
-                project_path=project_path,
-                file_path=str(file_path),
-                content=content[:10000],  # Cap per-event size
-                indexed=False,
-                created_at=datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
-            )
+            created_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if session_id not in buckets:
+                buckets[session_id] = {
+                    "parts": [content],
+                    "project_path": project_path,
+                    "created_at": created_at,
+                }
+                order.append(session_id)
+            else:
+                buckets[session_id]["parts"].append(content)
+
+    for session_id in order:
+        bucket = buckets[session_id]
+        yield Session(
+            session_id=session_id,
+            agent=agent,
+            project_path=bucket["project_path"],
+            file_path=str(file_path),
+            content="\n".join(bucket["parts"])[:10000],
+            indexed=False,
+            created_at=bucket["created_at"],
+        )
 
 
 def parse_codex_json(file_path: Path, agent: str = "codex") -> Iterator[Session]:

@@ -50,8 +50,10 @@ def test_corrupt_claude_line_warns_with_line_number_and_keeps_neighbours(tmp_pat
     messages = [str(w.message) for w in record]
     assert any(f"{f}:2:" in m for m in messages), messages
     assert any("skipping unparsable JSONL line" in m for m in messages), messages
-    # Reporting the bad line must not cost the good ones.
-    assert len(sessions) == 2
+    # Reporting the bad line must not cost the good ones. Same session_id is
+    # aggregated into one Session (issue #112), so both texts must survive.
+    assert len(sessions) == 1
+    assert sessions[0].content.count("Use SQLite for the index.") == 2
 
 
 def test_corrupt_opencode_line_warns_with_line_number(tmp_path):
