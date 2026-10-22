@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Parsers reject oversized session files before reading them.**
+  `parse_hermes_log` and `parse_codex_json` used to load the whole file with
+  no size check, so a multi-GB log could OOM the process. Every public parser
+  and `auto_detect_parser` now enforce a configurable limit (default
+  100 MiB) and raise `FileTooLargeError` with the path and sizes.
+  `context-bridge index --max-file-size` exposes the same guard, and oversized
+  files are reported instead of being swallowed by the generic parse
+  `except`. Hermes logs are walked line by line so a large-but-allowed file
+  never has to sit in memory whole.
+
 ## [0.3.0] - 2026-10-08
 
 ### Fixed

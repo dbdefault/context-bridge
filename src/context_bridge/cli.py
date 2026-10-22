@@ -8,7 +8,12 @@ from rich.console import Console
 from rich.table import Table
 
 from .models import Memory, MemoryType, Query
-from .parsers import ParserNotDetectedError, auto_detect_parser
+from .parsers import (
+    DEFAULT_MAX_FILE_SIZE,
+    FileTooLargeError,
+    ParserNotDetectedError,
+    auto_detect_parser,
+)
 from .store import MemoryStore
 
 console = Console()
@@ -45,8 +50,18 @@ def init(ctx):
 
 @cli.command()
 @click.argument("path", type=click.Path(exists=True))
+@click.option(
+    "--max-file-size",
+    type=int,
+    default=DEFAULT_MAX_FILE_SIZE,
+    show_default=True,
+    help=(
+        "Reject session files larger than this many bytes before reading them. "
+        "Pass a negative value to disable the limit."
+    ),
+)
 @click.pass_context
-def index(ctx, path):
+def index(ctx, path, max_file_size):
     """Index AI agent sessions from a directory."""
     store = get_store(ctx)
     base = Path(path)
@@ -56,10 +71,11 @@ def index(ctx, path):
 
     total_sessions = 0
     unroutable: list[str] = []
+    too_large: list[str] = []
     for fp in files:
         try:
-            parser = auto_detect_parser(fp)
-            for session in parser(fp):
+            parser = auto_detect_parser(fp, max_file_size=max_file_size)
+            for session in parser(fp, max_file_size=max_file_size):
                 rowid = store.add_session(session)
                 if rowid > 0:
                     total_sessions += 1
@@ -71,6 +87,11 @@ def index(ctx, path):
                         project_path=session.project_path,
                     )
                     store.add_memory(memory)
+        except FileTooLargeError as exc:
+            # Size rejects must stay visible: swallowing them as a generic
+            # ValueError would hide the DoS guard and look like a parse miss.
+            too_large.append(str(exc))
+            continue
         except ParserNotDetectedError as exc:
             # Naming the file is the whole point: it is not an agent session and
             # was not indexed, and the run says so instead of counting it in.
@@ -91,6 +112,8 @@ def index(ctx, path):
     console.print(
         f"[green]✅ Indexed {total_sessions} sessions from {len(files)} files[/green]"
     )
+    for message in too_large:
+        console.print(f"[red]⛔  {message}[/red]")
     for message in unroutable:
         console.print(f"[yellow]⚠️  {message}[/yellow]")
 

@@ -3,11 +3,40 @@
 import json
 import re
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import Session
+
+# Hard cap on how much of a single session file may be read. Without this, a
+# multi-GB log (or a maliciously large one) is loaded whole by ``read_text`` /
+# ``json.load`` and can OOM the process. JSONL readers already stream
+# line-by-line; the check still rejects the file before any work starts so a
+# multi-GB walk cannot stall indexing either.
+DEFAULT_MAX_FILE_SIZE = 100 * 1024 * 1024
+
+
+class FileTooLargeError(ValueError):
+    """Raised when a session file exceeds the configured size limit."""
+
+
+def ensure_file_within_limit(
+    file_path: Path, max_file_size: int = DEFAULT_MAX_FILE_SIZE
+) -> int:
+    """Return ``st_size`` or raise ``FileTooLargeError`` if over the limit.
+
+    ``max_file_size`` of ``0`` rejects every non-empty file. A negative value is
+    treated as "no limit" for callers that deliberately opt out.
+    """
+    size = file_path.stat().st_size
+    if max_file_size >= 0 and size > max_file_size:
+        raise FileTooLargeError(
+            f"{file_path}: file is {size} bytes, which exceeds the "
+            f"{max_file_size} byte limit. Raise --max-file-size or split the "
+            f"log before indexing."
+        )
+    return size
 
 
 def extract_text_content(content) -> list[str]:
@@ -33,9 +62,12 @@ def extract_text_content(content) -> list[str]:
 
 
 def parse_claude_code_jsonl(
-    file_path: Path, agent: str = "claude"
+    file_path: Path,
+    agent: str = "claude",
+    max_file_size: int = DEFAULT_MAX_FILE_SIZE,
 ) -> Iterator[Session]:
-    """Parse Claude Code JSONL session logs."""
+    """Parse Claude Code JSONL session logs line by line."""
+    ensure_file_within_limit(file_path, max_file_size)
     with open(file_path) as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
@@ -87,8 +119,19 @@ def parse_claude_code_jsonl(
             )
 
 
-def parse_codex_json(file_path: Path, agent: str = "codex") -> Iterator[Session]:
-    """Parse Codex JSON session logs."""
+def parse_codex_json(
+    file_path: Path,
+    agent: str = "codex",
+    max_file_size: int = DEFAULT_MAX_FILE_SIZE,
+) -> Iterator[Session]:
+    """Parse Codex JSON session logs.
+
+    The whole document is loaded only after the size check, so peak memory is
+    bounded by ``max_file_size``. Streaming the ``entries`` array with an
+    incremental JSON parser would further lower peak memory for documents near
+    the limit; it is left out here to avoid a new hard dependency.
+    """
+    ensure_file_within_limit(file_path, max_file_size)
     with open(file_path) as f:
         data = json.load(f)
 
@@ -117,8 +160,13 @@ def parse_codex_json(file_path: Path, agent: str = "codex") -> Iterator[Session]
         )
 
 
-def parse_opencode_jsonl(file_path: Path, agent: str = "opencode") -> Iterator[Session]:
-    """Parse OpenCode JSONL session logs."""
+def parse_opencode_jsonl(
+    file_path: Path,
+    agent: str = "opencode",
+    max_file_size: int = DEFAULT_MAX_FILE_SIZE,
+) -> Iterator[Session]:
+    """Parse OpenCode JSONL session logs line by line."""
+    ensure_file_within_limit(file_path, max_file_size)
     session_id = str(file_path.resolve())
     with open(file_path) as f:
         content_parts = []
@@ -155,32 +203,56 @@ def parse_opencode_jsonl(file_path: Path, agent: str = "opencode") -> Iterator[S
             )
 
 
-def parse_hermes_log(file_path: Path, agent: str = "hermes") -> Iterator[Session]:
-    """Parse Hermes agent session logs (markdown/text format)."""
-    content = file_path.read_text(errors="replace")
-    # Split by session markers
-    sessions = re.split(r"(?:^|\n)## Session: (.+?)\n", content)
-    if len(sessions) <= 1:
-        yield Session(
-            session_id=str(file_path.resolve()),
+_HERMES_SESSION_HEADER = re.compile(r"^## Session: (.+?)\s*$")
+
+
+def parse_hermes_log(
+    file_path: Path,
+    agent: str = "hermes",
+    max_file_size: int = DEFAULT_MAX_FILE_SIZE,
+) -> Iterator[Session]:
+    """Parse Hermes agent session logs (markdown/text format).
+
+    The file is walked line by line so a large log never has to sit in memory
+    whole. Bodies are still truncated to 10 000 characters per session, matching
+    the other parsers.
+    """
+    ensure_file_within_limit(file_path, max_file_size)
+
+    def emit(session_id: str, body: str) -> Session:
+        return Session(
+            session_id=session_id,
             agent=agent,
             project_path=str(file_path.parent),
             file_path=str(file_path),
-            content=content[:10000],
+            content=body[:10000],
             indexed=False,
         )
-    else:
-        for i in range(1, len(sessions), 2):
-            session_id = sessions[i].strip()
-            body = sessions[i + 1] if i + 1 < len(sessions) else ""
-            yield Session(
-                session_id=session_id,
-                agent=agent,
-                project_path=str(file_path.parent),
-                file_path=str(file_path),
-                content=body[:10000],
-                indexed=False,
-            )
+
+    current_id: str | None = None
+    current_parts: list[str] = []
+    saw_header = False
+
+    with open(file_path, errors="replace") as f:
+        for line in f:
+            match = _HERMES_SESSION_HEADER.match(line)
+            if match:
+                if current_id is not None:
+                    yield emit(current_id, "".join(current_parts))
+                elif saw_header is False and current_parts:
+                    # Preamble before the first header is ignored the same way
+                    # ``re.split`` discarded the text before the first marker.
+                    pass
+                saw_header = True
+                current_id = match.group(1).strip()
+                current_parts = []
+                continue
+            current_parts.append(line)
+
+    if not saw_header:
+        yield emit(str(file_path.resolve()), "".join(current_parts))
+    elif current_id is not None:
+        yield emit(current_id, "".join(current_parts))
 
 
 class ParserNotDetectedError(Exception):
@@ -191,19 +263,25 @@ class ParserNotDetectedError(Exception):
 _JSON_SUFFIXES = frozenset({".json", ".jsonl"})
 
 
-def _json_head(file_path: Path) -> dict | None:
+def _json_head(
+    file_path: Path, max_file_size: int = DEFAULT_MAX_FILE_SIZE
+) -> dict | None:
     """Return the file's first JSON object, or None if there is none.
 
-    A ``.json`` file holds one document, so it is read whole; a ``.jsonl`` file
-    is read line by line, and its first object is the one that identifies the
-    writer.
+    A ``.json`` file holds one document, so it is read whole after the size
+    check; a ``.jsonl`` file is read line by line, and its first object is the
+    one that identifies the writer. Oversized files raise ``FileTooLargeError``
+    so detection itself cannot OOM.
     """
     try:
+        ensure_file_within_limit(file_path, max_file_size)
         if file_path.suffix.lower() == ".json":
             text = file_path.read_text(errors="replace")
         else:
             with open(file_path) as f:
                 text = next((line for line in f if line.strip()), "")
+    except FileTooLargeError:
+        raise
     except OSError:
         return None
 
@@ -216,7 +294,9 @@ def _json_head(file_path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def auto_detect_parser(file_path: Path):
+def auto_detect_parser(
+    file_path: Path, max_file_size: int = DEFAULT_MAX_FILE_SIZE
+) -> Callable[..., Iterator[Session]]:
     """Detect agent type from file content and return the appropriate parser.
 
     The format marker lives inside the file. The path is not a signal: matching
@@ -227,12 +307,18 @@ def auto_detect_parser(file_path: Path):
     fully described by its own markers, so the content decides alone, and an
     unmarked JSON file raises instead of being handed to a parser that would
     read it, find nothing and let the session go silently unindexed.
+
+    The returned callable is the parser function itself (identity checks in
+    tests stay stable). Callers that override the size limit should pass
+    ``max_file_size`` both here and to the parser call.
     """
+    ensure_file_within_limit(file_path, max_file_size)
+
     if file_path.suffix.lower() not in _JSON_SUFFIXES:
         # Markdown/text: the Hermes reader is the only one that handles it.
         return parse_hermes_log
 
-    data = _json_head(file_path)
+    data = _json_head(file_path, max_file_size=max_file_size)
     if data is not None:
         # Claude Code events carry a top-level "type", OpenCode lines only ever
         # carry a "message", and a Codex session carries an "entries" list.

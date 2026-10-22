@@ -23,6 +23,7 @@ content-first contract:
 """
 
 import json
+import re
 
 import pytest
 
@@ -155,7 +156,10 @@ def test_index_stores_a_session_under_a_false_positive_directory(tmp_path):
     result = CliRunner().invoke(cli, ["--db", str(db), "index", str(f.parent)])
 
     assert result.exit_code == 0, result.output
-    assert "Indexed 1 sessions" in result.output
+    # Rich highlights digits with ANSI codes ("1" -> bold green), so strip
+    # them before the plain-text substring check.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "Indexed 1 sessions" in plain
 
     from context_bridge.store import MemoryStore
 

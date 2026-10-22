@@ -33,6 +33,8 @@ Format detection reads the file's **content**, not its path: living under `.herm
 
 ## Limits
 
+- **Per-file size cap.** A session file larger than **100 MiB** (104 857 600 bytes) is rejected before it is read, with a clear error. This stops a multi-GB or corrupted log from exhausting memory. Override with `context-bridge index <path> --max-file-size <bytes>` (pass a negative value to disable).
+- **Streaming reads.** JSONL parsers and the Hermes markdown reader walk the file line by line. Codex `.json` documents are loaded only after the size check, so peak memory stays bounded by the limit.
 - **Per-event cap.** Each event's text is truncated to **10 000 characters** before it is stored. A very long response is indexed only in part.
 - **Only text is indexed.** Non-text blocks — tool calls, images — are dropped.
 - **Unparsable lines are skipped, with a warning.** A half-written trailing line in a `.jsonl` file is normal for an agent that was killed; the good lines are still indexed and the bad one is named.
