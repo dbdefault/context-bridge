@@ -3,7 +3,7 @@
 import enum
 from datetime import datetime, timezone
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class MemoryType(str, enum.Enum):
@@ -22,8 +22,8 @@ class Memory(BaseModel):
     session_id: str
     project_path: str
     relevance_score: float = 0.0
-    created_at: datetime = datetime.now(tz=timezone.utc)
-    updated_at: datetime = datetime.now(tz=timezone.utc)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
     access_count: int = 0
     importance: float = 0.5
 
@@ -36,7 +36,7 @@ class Session(BaseModel):
     file_path: str
     content: str
     indexed: bool = False
-    created_at: datetime = datetime.now(tz=timezone.utc)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
 
 
 class Query(BaseModel):
